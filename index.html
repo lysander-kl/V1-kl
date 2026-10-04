@@ -519,27 +519,67 @@
 </div>
 
 <script>
+
+/* ============================================================
+   VIEL REFACTOR v1 — SAFE STATE ARCHITECTURE
+   ------------------------------------------------------------
+   UI, Google Sheets API contract, role system, and existing
+   features are intentionally preserved.
+   Main change: mutable application state is centralized in App.
+   ============================================================ */
+
+function getCurrentUser() {
+  return App.state.users[App.session.username] || null;
+}
+
+function hasRole(...roles) {
+  return roles.includes(App.session.role);
+}
+
+function hasTeacherAccess() {
+  return hasRole('guru', 'admin');
+}
+
+function hasAdminAccess() {
+  return App.session.role === 'admin';
+}
+
 /* ============================================================
    ⚙️ KONFIGURASI API
    ============================================================ */
-const API_URL = 'https://script.google.com/macros/s/AKfycbwUlnDjHrNJB-Qqgg5QZiaPaEFsq3KdCkebj2hrp2U8oegoRb9KW3dO9Z0MawpBsNZJ/exec';
+const CONFIG = Object.freeze({
+  API_URL: 'https://script.google.com/macros/s/AKfycbymticCBokHPBBa8GrIx-leVvSRotLI99aZg2LxtPc_HxJe1wLcz1HBRGFkP0bhiHyf/exec',
+  SESSION_TIMEOUT: 30 * 60 * 1000,
+  MAX_FILE_SIZE: 2 * 1024 * 1024
+});
 
-/* ============================================================
-   STATE
-   ============================================================ */
-let USERS = {};
-let DATA_TASKS = [];
-let DATA_INFO = [];
-let DATA_ATTENDANCE = [];
-let DATA_GRADES = [];
-let DATA_SUBMISSIONS = {};
-let DATA_SCHEDULE = [];
+/*
+ * Central application state.
+ * Keeping mutable state in one place makes the app easier to debug
+ * and much safer to extend than a long list of unrelated globals.
+ */
+const App = {
+  state: {
+    users: {},
+    tasks: [],
+    info: [],
+    attendance: [],
+    grades: [],
+    submissions: {},
+    schedule: []
+  },
 
-let currentUser = null;
-let currentUsername = '';
-let sessionTimeout = null;
-let currentEditorTab = 'tasks';
-let _editScheduleKelas = 'X TKJ';
+  session: {
+    role: null,
+    username: '',
+    timeout: null
+  },
+
+  ui: {
+    currentEditorTab: 'tasks',
+    editScheduleKelas: 'X TKJ'
+  }
+};
 
 /* ============================================================
    DEBUG PANEL
@@ -550,9 +590,9 @@ function toggleDebug() {
   if (panel.classList.contains('show')) {
     panel.innerHTML = `
       <div><strong>🔍 Debug Info:</strong></div>
-      <div>API_URL: ${API_URL.substring(0, 60)}${API_URL.length > 60 ? '...' : ''}</div>
+      <div>API_URL: ${CONFIG.CONFIG.API_URL.substring(0, 60)}${CONFIG.API_URL.length > 60 ? '...' : ''}</div>
       <div>Host: ${location.host}</div>
-      <div style="margin-top:6px;"><a href="${API_URL}?sheet=users" target="_blank" style="color:#0ff;">Test GET users →</a></div>
+      <div style="margin-top:6px;"><a href="${CONFIG.API_URL}?sheet=users" target="_blank" style="color:#0ff;">Test GET users →</a></div>
     `;
   }
 }
@@ -570,7 +610,7 @@ function hideLoading() {
 
 async function apiGet(sheetName) {
   try {
-    const url = `${API_URL}?sheet=${sheetName}&_t=${Date.now()}`;
+    const url = `${CONFIG.API_URL}?sheet=${sheetName}&_t=${Date.now()}`;
     console.log('📡 GET:', url);
     const res = await fetch(url, { method: 'GET', redirect: 'follow' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -592,7 +632,7 @@ async function apiPost(sheetName, payload) {
     } else {
       body = { sheet: sheetName, ...payload };
     }
-    await fetch(API_URL, {
+    await fetch(CONFIG.API_URL, {
       method: 'POST',
       mode: 'no-cors',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -621,10 +661,10 @@ async function loadAllData() {
     apiGet('schedule')
   ]);
 
-  USERS = {};
+  App.state.users = {};
   users.forEach(u => {
     if (!u.username) return;
-    USERS[String(u.username)] = {
+    App.state.users[String(u.username)] = {
       password: u.password,
       role: u.role,
       name: u.full_name,
@@ -638,7 +678,7 @@ async function loadAllData() {
     };
   });
 
-  DATA_TASKS = tasks.map(t => ({
+  App.state.tasks = tasks.map(t => ({
     id: String(t.id || t.judul || Math.random()),
     judul: t.judul, mapel: t.mapel, kelas: t.kelas,
     deadline: t.deadline, deskripsi: t.deskripsi, guru: t.guru,
@@ -647,18 +687,18 @@ async function loadAllData() {
     attachmentName: t.attachment_name || ''
   }));
 
-  DATA_INFO = info.map(i => ({
+  App.state.info = info.map(i => ({
     id: String(i.id || i.judul),
     tanggal: i.tanggal, judul: i.judul, isi: i.isi,
     attachmentName: i.attachment_name || '',
     attachmentUrl: i.attachment_url || ''
   }));
 
-  DATA_ATTENDANCE = attendance.map(a => ({
+  App.state.attendance = attendance.map(a => ({
     username: a.username, tanggal: a.tanggal, status: a.status
   }));
 
-  DATA_SCHEDULE = schedule.map(s => ({
+  App.state.schedule = schedule.map(s => ({
     id: String(s.id || ''),
     kelas: String(s.kelas || ''),
     hari: String(s.hari || ''),
@@ -667,11 +707,11 @@ async function loadAllData() {
     mapel: String(s.mapel || '')
   }));
 
-  DATA_SUBMISSIONS = {};
+  App.state.submissions = {};
   submissions.forEach(s => {
     if (!s.username || !s.task_id) return;
-    if (!DATA_SUBMISSIONS[s.username]) DATA_SUBMISSIONS[s.username] = {};
-    DATA_SUBMISSIONS[s.username][String(s.task_id)] = {
+    if (!App.state.submissions[s.username]) App.state.submissions[s.username] = {};
+    App.state.submissions[s.username][String(s.task_id)] = {
       status: s.status || 'Selesai',
       submittedAt: s.submitted_at,
       jawaban: s.jawaban,
@@ -708,13 +748,13 @@ function fileToBase64(file) {
 
 async function uploadFile(file) {
   if (!file) return { url: '', name: '' };
-  if (file.size > 2 * 1024 * 1024) {
+  if (file.size > CONFIG.MAX_FILE_SIZE) {
     toast('⚠️ File max 2MB!', 'error');
     return { url: '', name: '' };
   }
   try {
     const base64 = await fileToBase64(file);
-    await fetch(API_URL, {
+    await fetch(CONFIG.API_URL, {
       method: 'POST',
       mode: 'no-cors',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -803,7 +843,7 @@ const DATA_JADWAL = {
 };
 
 function buildScheduleFromSheets(kelas) {
-  const rows = DATA_SCHEDULE.filter(s => s.kelas === kelas);
+  const rows = App.state.schedule.filter(s => s.kelas === kelas);
   if (!rows.length) return null;
   const jadwal = {};
   const hariList = ['Senin','Selasa','Rabu','Kamis','Jumat'];
@@ -830,10 +870,10 @@ function buildScheduleFromSheets(kelas) {
    HELPER: Relasi ortu
    ============================================================ */
 function getAnakFromOrtu(ortuUsername) {
-  const ortu = USERS[ortuUsername];
+  const ortu = App.state.users[ortuUsername];
   if (!ortu || ortu.role !== 'ortu') return null;
-  if (ortu.anakUsername && USERS[ortu.anakUsername] && USERS[ortu.anakUsername].role === 'siswa') {
-    return { username: ortu.anakUsername, data: USERS[ortu.anakUsername] };
+  if (ortu.anakUsername && App.state.users[ortu.anakUsername] && App.state.users[ortu.anakUsername].role === 'siswa') {
+    return { username: ortu.anakUsername, data: App.state.users[ortu.anakUsername] };
   }
   return null;
 }
@@ -855,20 +895,20 @@ async function handleLogin() {
   showLoading('Memverifikasi...');
   await loadAllData();
 
-  if (!USERS[username]) { hideLoading(); return showLoginError('❌ Username tidak ditemukan!'); }
-  if (USERS[username].password !== password) { hideLoading(); return showLoginError('❌ Password salah!'); }
-  if (USERS[username].role !== role) {
+  if (!App.state.users[username]) { hideLoading(); return showLoginError('❌ Username tidak ditemukan!'); }
+  if (App.state.users[username].password !== password) { hideLoading(); return showLoginError('❌ Password salah!'); }
+  if (App.state.users[username].role !== role) {
     hideLoading();
     if (isAdminMode) return showLoginError('❌ Akun ini bukan admin!');
     return showLoginError('❌ Role tidak sesuai!');
   }
 
-  currentUsername = username;
-  currentUser = role;
+  App.session.username = username;
+  App.session.role = role;
 
   document.getElementById('loginScreen').classList.add('hide');
   document.getElementById('appContent').classList.add('show');
-  document.getElementById('displayName').textContent = USERS[username].fullName || USERS[username].name;
+  document.getElementById('displayName').textContent = App.state.users[username].fullName || App.state.users[username].name;
   document.getElementById('displayRole').textContent = role.toUpperCase();
 
   const isGuruOrAdmin = role === 'guru' || role === 'admin';
@@ -887,7 +927,7 @@ async function handleLogin() {
   resetSessionTimer();
   renderAll();
   hideLoading();
-  toast(`Selamat datang, ${USERS[username].fullName || username}!`, 'success');
+  toast(`Selamat datang, ${App.state.users[username].fullName || username}!`, 'success');
 
   if (adminPanel) adminPanel.style.display = 'none';
 }
@@ -899,18 +939,18 @@ function showLoginError(msg) {
 }
 
 function resetSessionTimer() {
-  if (sessionTimeout) clearTimeout(sessionTimeout);
-  sessionTimeout = setTimeout(() => {
-    if (currentUser) { toast('Sesi berakhir.', 'warning'); handleLogout(); }
-  }, 30 * 60 * 1000);
+  if (App.session.timeout) clearTimeout(App.session.timeout);
+  App.session.timeout = setTimeout(() => {
+    if (App.session.role) { toast('Sesi berakhir.', 'warning'); handleLogout(); }
+  }, CONFIG.SESSION_TIMEOUT);
 }
 ['click','keydown','mousemove'].forEach(evt => {
-  document.addEventListener(evt, () => { if (currentUser) resetSessionTimer(); });
+  document.addEventListener(evt, () => { if (App.session.role) resetSessionTimer(); });
 });
 
 function handleLogout() {
-  if (sessionTimeout) clearTimeout(sessionTimeout);
-  currentUser = null; currentUsername = '';
+  if (App.session.timeout) clearTimeout(App.session.timeout);
+  App.session.role = null; App.session.username = '';
   document.getElementById('loginScreen').classList.remove('hide');
   document.getElementById('appContent').classList.remove('show');
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
@@ -974,8 +1014,8 @@ function renderAll() {
   renderProfile();
   renderAttendance();
   renderInfo();
-  if (currentUser === 'guru' || currentUser === 'admin') renderSubmissionList();
-  if (currentUser === 'admin') { renderAdminPanel(); renderEditor(); }
+  if (App.session.role === 'guru' || App.session.role === 'admin') renderSubmissionList();
+  if (App.session.role === 'admin') { renderAdminPanel(); renderEditor(); }
 }
 
 /* ---------- DASHBOARD ---------- */
@@ -983,10 +1023,10 @@ function renderDashboard() {
   const stats = document.getElementById('dashboardStats');
   const recent = document.getElementById('recentActivity');
 
-  if (currentUser === 'siswa') {
-    const u = USERS[currentUsername];
-    const tugasKelas = DATA_TASKS.filter(t => t.kelas === u.kelas);
-    const subs = DATA_SUBMISSIONS[currentUsername] || {};
+  if (App.session.role === 'siswa') {
+    const u = App.state.users[App.session.username];
+    const tugasKelas = App.state.tasks.filter(t => t.kelas === u.kelas);
+    const subs = App.state.submissions[App.session.username] || {};
     const done = tugasKelas.filter(t => subs[t.id]?.status === 'Selesai').length;
     const pending = tugasKelas.length - done;
 
@@ -1003,12 +1043,12 @@ function renderDashboard() {
     });
     recent.innerHTML = aktivitas.length ? `<ul style="list-style:none; padding:0; line-height:2;">${aktivitas.join('')}</ul>` : `<div class="empty-state"><i class="fas fa-inbox"></i><p>Belum ada aktivitas.</p></div>`;
 
-  } else if (currentUser === 'guru') {
-    const u = USERS[currentUsername];
-    const tugasSaya = DATA_TASKS.filter(t => t.guru === currentUsername);
+  } else if (App.session.role === 'guru') {
+    const u = App.state.users[App.session.username];
+    const tugasSaya = App.state.tasks.filter(t => t.guru === App.session.username);
     let subCount = 0, belumDinilai = 0;
     tugasSaya.forEach(t => {
-      Object.values(DATA_SUBMISSIONS).forEach(subs => {
+      Object.values(App.state.submissions).forEach(subs => {
         if (subs[t.id]) {
           subCount++;
           if (subs[t.id].nilai === null || subs[t.id].nilai === undefined) belumDinilai++;
@@ -1025,14 +1065,14 @@ function renderDashboard() {
 
     recent.innerHTML = tugasSaya.length ? `<ul style="list-style:none; padding:0; line-height:2;">
       ${tugasSaya.slice(0,5).map(t => {
-        const count = Object.values(DATA_SUBMISSIONS).filter(s => s[t.id]).length;
+        const count = Object.values(App.state.submissions).filter(s => s[t.id]).length;
         return `<li><i class="fas fa-paper-plane" style="color:var(--primary)"></i> <strong>${t.judul}</strong> — ${t.kelas} (${count} submission)</li>`;
       }).join('')}
     </ul>` : `<div class="empty-state"><i class="fas fa-inbox"></i><p>Belum ada tugas.</p></div>`;
 
-  } else if (currentUser === 'ortu') {
-    const u = USERS[currentUsername];
-    const anakRel = getAnakFromOrtu(currentUsername);
+  } else if (App.session.role === 'ortu') {
+    const u = App.state.users[App.session.username];
+    const anakRel = getAnakFromOrtu(App.session.username);
     const anakUser = anakRel?.username;
     const anak = anakRel?.data;
 
@@ -1047,18 +1087,18 @@ function renderDashboard() {
         <p style="margin-bottom:0.8rem;"><strong>Ringkasan akademik ${anak.fullName||anak.name}:</strong></p>
         <ul style="list-style:none; padding:0; line-height:2;">
           <li>📚 Kehadiran: <strong>${calcAttendanceRate(anakUser)}</strong></li>
-          <li>📝 Tugas selesai: <strong>${Object.values(DATA_SUBMISSIONS[anakUser]||{}).filter(s=>s.status==='Selesai').length}</strong></li>
+          <li>📝 Tugas selesai: <strong>${Object.values(App.state.submissions[anakUser]||{}).filter(s=>s.status==='Selesai').length}</strong></li>
           <li>🏃 Ekskul: <strong>${anak.ekskul||'-'}</strong></li>
         </ul>`;
     } else {
       recent.innerHTML = `<div class="empty-state"><p>Data anak belum terhubung.</p></div>`;
     }
 
-  } else if (currentUser === 'admin') {
-    const total = Object.keys(USERS).length;
-    const siswa = Object.values(USERS).filter(u=>u.role==='siswa').length;
-    const guru = Object.values(USERS).filter(u=>u.role==='guru').length;
-    const admin = Object.values(USERS).filter(u=>u.role==='admin').length;
+  } else if (App.session.role === 'admin') {
+    const total = Object.keys(App.state.users).length;
+    const siswa = Object.values(App.state.users).filter(u=>u.role==='siswa').length;
+    const guru = Object.values(App.state.users).filter(u=>u.role==='guru').length;
+    const admin = Object.values(App.state.users).filter(u=>u.role==='admin').length;
 
     stats.innerHTML = `
       <div class="stat-card"><i class="fas fa-users"></i><div class="stat-detail"><span class="stat-label">Total Pengguna</span><span class="stat-value">${total}</span></div></div>
@@ -1071,15 +1111,15 @@ function renderDashboard() {
       <ul style="list-style:none; padding:0; line-height:2;">
         <li><i class="fas fa-check-circle" style="color:var(--success)"></i> Terhubung ke Google Sheets.</li>
         <li><i class="fas fa-database" style="color:var(--primary)"></i> Total ${total} pengguna.</li>
-        <li><i class="fas fa-file-pen" style="color:var(--primary)"></i> ${DATA_TASKS.length} tugas · ${DATA_INFO.length} pengumuman.</li>
-        <li><i class="fas fa-calendar-alt" style="color:var(--primary)"></i> ${DATA_SCHEDULE.length} baris jadwal di Sheets.</li>
+        <li><i class="fas fa-file-pen" style="color:var(--primary)"></i> ${App.state.tasks.length} tugas · ${App.state.info.length} pengumuman.</li>
+        <li><i class="fas fa-calendar-alt" style="color:var(--primary)"></i> ${App.state.schedule.length} baris jadwal di Sheets.</li>
       </ul>
     `;
   }
 }
 
 function calcAttendanceRate(username) {
-  const records = DATA_ATTENDANCE.filter(a => a.username === username);
+  const records = App.state.attendance.filter(a => a.username === username);
   if (!records.length) return '-';
   const hadir = records.filter(r => r.status === 'Hadir').length;
   return Math.round((hadir / records.length) * 100) + '%';
@@ -1089,8 +1129,8 @@ function calcAttendanceRate(username) {
 function renderSchedule() {
   const container = document.getElementById('scheduleTable');
   let kelasAktif;
-  if (currentUser === 'siswa') {
-    kelasAktif = USERS[currentUsername]?.kelas;
+  if (App.session.role === 'siswa') {
+    kelasAktif = App.state.users[App.session.username]?.kelas;
   } else {
     const select = document.getElementById('jadwalKelasSelect');
     kelasAktif = select?.value || 'X TKJ';
@@ -1150,18 +1190,18 @@ function renderSchedule() {
 /* ---------- TUGAS ---------- */
 function renderTasks() {
   const container = document.getElementById('taskList');
-  let tasks = DATA_TASKS;
+  let tasks = App.state.tasks;
 
-  if (currentUser === 'siswa') tasks = tasks.filter(t => t.kelas === USERS[currentUsername]?.kelas);
-  else if (currentUser === 'guru') tasks = tasks.filter(t => t.guru === currentUsername);
+  if (App.session.role === 'siswa') tasks = tasks.filter(t => t.kelas === App.state.users[App.session.username]?.kelas);
+  else if (App.session.role === 'guru') tasks = tasks.filter(t => t.guru === App.session.username);
 
   if (!tasks.length) {
     container.innerHTML = `<div class="empty-state"><i class="fas fa-tasks"></i><p>Belum ada tugas.</p></div>`;
     return;
   }
 
-  const subs = DATA_SUBMISSIONS[currentUsername] || {};
-  const isSiswa = currentUser === 'siswa';
+  const subs = App.state.submissions[App.session.username] || {};
+  const isSiswa = App.session.role === 'siswa';
 
   container.innerHTML = tasks.map(t => {
     const sub = subs[t.id];
@@ -1188,7 +1228,7 @@ function renderTasks() {
 
     let submissionInfo = '';
     if (!isSiswa) {
-      const count = Object.values(DATA_SUBMISSIONS).filter(s => s[t.id]).length;
+      const count = Object.values(App.state.submissions).filter(s => s[t.id]).length;
       submissionInfo = `<div style="font-size:0.8rem; color:var(--text-muted); margin-top:4px;"><i class="fas fa-inbox"></i> ${count} dikumpulkan</div>`;
     }
 
@@ -1216,10 +1256,10 @@ function renderSubmissionList() {
   const container = document.getElementById('submissionList');
   if (!container) return;
 
-  const myTasks = currentUser === 'admin' ? DATA_TASKS : DATA_TASKS.filter(t => t.guru === currentUsername);
+  const myTasks = App.session.role === 'admin' ? App.state.tasks : App.state.tasks.filter(t => t.guru === App.session.username);
   const items = [];
   myTasks.forEach(t => {
-    Object.entries(DATA_SUBMISSIONS).forEach(([siswa, subs]) => {
+    Object.entries(App.state.submissions).forEach(([siswa, subs]) => {
       if (subs[t.id]) items.push({ task: t, siswa, sub: subs[t.id] });
     });
   });
@@ -1237,7 +1277,7 @@ function renderSubmissionList() {
   }
 
   container.innerHTML = items.map(item => {
-    const siswaData = USERS[item.siswa];
+    const siswaData = App.state.users[item.siswa];
     const nama = siswaData?.fullName || siswaData?.name || item.siswa;
     const sudahDinilai = item.sub.nilai !== null && item.sub.nilai !== undefined;
     const badge = sudahDinilai ? `<span class="badge badge-success">Nilai: ${item.sub.nilai}</span>` : `<span class="badge badge-warning">⏳ Belum Dinilai</span>`;
@@ -1258,10 +1298,10 @@ function renderSubmissionList() {
 }
 
 function openGradeModal(siswaUsername, taskId) {
-  const task = DATA_TASKS.find(t => t.id === taskId);
-  const sub = DATA_SUBMISSIONS[siswaUsername]?.[taskId];
+  const task = App.state.tasks.find(t => t.id === taskId);
+  const sub = App.state.submissions[siswaUsername]?.[taskId];
   if (!task || !sub) return;
-  const siswaData = USERS[siswaUsername];
+  const siswaData = App.state.users[siswaUsername];
   const nama = siswaData?.fullName || siswaData?.name || siswaUsername;
   const currentNilai = sub.nilai ?? '';
   const currentFeedback = sub.feedback ?? '';
@@ -1316,7 +1356,7 @@ function openGradeModal(siswaUsername, taskId) {
 
 /* ---------- SISWA KERJAKAN TUGAS ---------- */
 function openTaskModal(taskId) {
-  const task = DATA_TASKS.find(t => t.id === taskId);
+  const task = App.state.tasks.find(t => t.id === taskId);
   if (!task) return;
 
   let attachmentHtml = '';
@@ -1349,12 +1389,12 @@ function openTaskModal(taskId) {
         attachUrl = up.url;
       }
       await apiPost('submissions', [
-        currentUsername, taskId, task.judul,
+        App.session.username, taskId, task.judul,
         note || '(tanpa catatan)', 'Selesai', new Date().toISOString(),
         '', '', attachName, attachUrl
       ]);
-      if (!DATA_SUBMISSIONS[currentUsername]) DATA_SUBMISSIONS[currentUsername] = {};
-      DATA_SUBMISSIONS[currentUsername][taskId] = {
+      if (!App.state.submissions[App.session.username]) App.state.submissions[App.session.username] = {};
+      App.state.submissions[App.session.username][taskId] = {
         status: 'Selesai', submittedAt: new Date().toISOString(),
         jawaban: note || '(tanpa catatan)',
         attachmentName: attachName, attachmentUrl: attachUrl,
@@ -1389,10 +1429,10 @@ async function sendTask() {
     const newTask = {
       id: 'T' + Date.now(),
       judul: title,
-      mapel: USERS[currentUsername].mapel || 'Umum',
+      mapel: App.state.users[App.session.username].mapel || 'Umum',
       kelas, deadline,
       deskripsi: desc || '-',
-      guru: currentUsername,
+      guru: App.session.username,
       createdAt: new Date().toISOString(),
       attachmentName: attachName,
       attachmentUrl: attachUrl
@@ -1402,7 +1442,7 @@ async function sendTask() {
       newTask.deadline, newTask.deskripsi, newTask.guru, newTask.createdAt,
       attachUrl
     ]);
-    DATA_TASKS.push(newTask);
+    App.state.tasks.push(newTask);
     document.getElementById('taskTitle').value = '';
     document.getElementById('taskDesc').value = '';
     document.getElementById('taskDeadline').value = '';
@@ -1418,8 +1458,8 @@ async function deleteTask(id) {
   showLoading('Menghapus...');
   try {
     await apiPost('tasks', { action: 'delete', id });
-    DATA_TASKS = DATA_TASKS.filter(t => t.id !== id);
-    Object.keys(DATA_SUBMISSIONS).forEach(s => delete DATA_SUBMISSIONS[s][id]);
+    App.state.tasks = App.state.tasks.filter(t => t.id !== id);
+    Object.keys(App.state.submissions).forEach(s => delete App.state.submissions[s][id]);
     toast('Tugas dihapus.', 'info');
     renderAll();
   } catch(e) {}
@@ -1429,11 +1469,11 @@ async function deleteTask(id) {
 /* ---------- INFO ---------- */
 function renderInfo() {
   const container = document.getElementById('infoList');
-  if (!DATA_INFO.length) {
+  if (!App.state.info.length) {
     container.innerHTML = `<div class="empty-state"><i class="fas fa-bullhorn"></i><p>Belum ada pengumuman.</p></div>`;
     return;
   }
-  container.innerHTML = DATA_INFO.map(i => {
+  container.innerHTML = App.state.info.map(i => {
     let attachmentHtml = '';
     if (i.attachmentUrl) {
       const isImg = /\.(jpg|jpeg|png|gif|webp)$/i.test(i.attachmentName || '');
@@ -1477,7 +1517,7 @@ async function addInfo() {
     }
     const id = 'I' + Date.now();
     await apiPost('info', [id, today(), title, desc, attachName, attachUrl]);
-    DATA_INFO.unshift({ id, tanggal: today(), judul: title, isi: desc, attachmentName: attachName, attachmentUrl: attachUrl });
+    App.state.info.unshift({ id, tanggal: today(), judul: title, isi: desc, attachmentName: attachName, attachmentUrl: attachUrl });
     document.getElementById('infoTitle').value = '';
     document.getElementById('infoDesc').value = '';
     if (fileInput) fileInput.value = '';
@@ -1491,10 +1531,10 @@ async function addInfo() {
 /* ---------- ABSEN ---------- */
 function renderAttendance() {
   const container = document.getElementById('attendanceTable');
-  let data = DATA_ATTENDANCE;
-  if (currentUser === 'siswa') data = data.filter(a => a.username === currentUsername);
-  else if (currentUser === 'ortu') {
-    const anakRel = getAnakFromOrtu(currentUsername);
+  let data = App.state.attendance;
+  if (App.session.role === 'siswa') data = data.filter(a => a.username === App.session.username);
+  else if (App.session.role === 'ortu') {
+    const anakRel = getAnakFromOrtu(App.session.username);
     data = anakRel ? data.filter(a => a.username === anakRel.username) : [];
   }
   if (!data.length) {
@@ -1505,7 +1545,7 @@ function renderAttendance() {
   data = data.slice().sort((a,b) => new Date(b.tanggal) - new Date(a.tanggal));
 
   let statHtml = '';
-  if (currentUser === 'siswa' || currentUser === 'ortu') {
+  if (App.session.role === 'siswa' || App.session.role === 'ortu') {
     const hadir = data.filter(a => a.status === 'Hadir').length;
     const izin = data.filter(a => a.status === 'Izin').length;
     const sakit = data.filter(a => a.status === 'Sakit').length;
@@ -1517,12 +1557,12 @@ function renderAttendance() {
       <div style="background:#f8d7da;"><small>Bolos</small><strong style="color:#721c24;">${bolos}</strong></div>
     </div>`;
   }
-  const showName = currentUser === 'admin' || currentUser === 'guru';
+  const showName = App.session.role === 'admin' || App.session.role === 'guru';
   container.innerHTML = `${statHtml}
     <table>
       <tr><th>Tanggal</th>${showName?'<th>Nama</th>':''}<th>Kelas</th><th>Status</th></tr>
       ${data.map(a => {
-        const u = USERS[a.username];
+        const u = App.state.users[a.username];
         return `<tr>
           <td>${formatDate(a.tanggal)}</td>
           ${showName?`<td>${u?u.fullName||u.name:a.username}</td>`:''}
@@ -1541,13 +1581,13 @@ function renderAbsenSiswaList() {
     container.innerHTML = `<div class="empty-state" style="padding:1rem;"><p>Pilih kelas.</p></div>`;
     return;
   }
-  const siswas = Object.entries(USERS).filter(([k,v]) => v.role === 'siswa' && v.kelas === kelas);
+  const siswas = Object.entries(App.state.users).filter(([k,v]) => v.role === 'siswa' && v.kelas === kelas);
   if (!siswas.length) {
     container.innerHTML = `<div class="empty-state" style="padding:1rem;"><p>Tidak ada siswa kelas ${kelas}.</p></div>`;
     return;
   }
   const existing = {};
-  DATA_ATTENDANCE.filter(a => a.tanggal === tanggal).forEach(a => { existing[a.username] = a.status; });
+  App.state.attendance.filter(a => a.tanggal === tanggal).forEach(a => { existing[a.username] = a.status; });
   container.innerHTML = `<div style="background:white; border-radius:12px; padding:1rem; border:1px solid #dce8f2;">
     ${siswas.map(([un, s]) => `
       <div class="absen-row">
@@ -1584,13 +1624,13 @@ async function saveAttendanceBatch() {
     for (const sel of sels) {
       const un = sel.dataset.username;
       const st = sel.value;
-      const s = USERS[un];
+      const s = App.state.users[un];
       await apiPost('attendance', [
         un, s?.fullName || s?.name || un, s?.kelas || kelas,
-        tanggal, st, currentUsername
+        tanggal, st, App.session.username
       ]);
-      DATA_ATTENDANCE = DATA_ATTENDANCE.filter(a => !(a.username === un && a.tanggal === tanggal));
-      DATA_ATTENDANCE.push({ username: un, tanggal, status: st });
+      App.state.attendance = App.state.attendance.filter(a => !(a.username === un && a.tanggal === tanggal));
+      App.state.attendance.push({ username: un, tanggal, status: st });
     }
     toast(`✅ Presensi ${sels.length} siswa tersimpan!`, 'success');
     renderAll();
@@ -1601,16 +1641,16 @@ async function saveAttendanceBatch() {
 /* ---------- PROFIL ---------- */
 function renderProfile() {
   const container = document.getElementById('profileContent');
-  const u = USERS[currentUsername];
+  const u = App.state.users[App.session.username];
   let profileUser = u, isViewingChild = false;
 
-  if (currentUser === 'ortu') {
-    const anakRel = getAnakFromOrtu(currentUsername);
+  if (App.session.role === 'ortu') {
+    const anakRel = getAnakFromOrtu(App.session.username);
     if (anakRel) { profileUser = anakRel.data; isViewingChild = true; }
     else { container.innerHTML = `<div class="empty-state"><p>Data anak belum terhubung.</p></div>`; return; }
   }
 
-  const nama = profileUser.fullName || profileUser.name || currentUsername;
+  const nama = profileUser.fullName || profileUser.name || App.session.username;
   const inisial = nama.split(' ').map(n => n[0]).join('').substring(0,2).toUpperCase();
 
   let roleLabel = 'User', roleIcon = 'fa-user';
@@ -1621,7 +1661,7 @@ function renderProfile() {
 
   let sections = '';
   if (profileUser.role === 'siswa') {
-    const un = isViewingChild ? Object.keys(USERS).find(k => USERS[k] === profileUser) : currentUsername;
+    const un = isViewingChild ? Object.keys(App.state.users).find(k => App.state.users[k] === profileUser) : App.session.username;
     sections = `
       <div class="biodata-section"><h4><i class="fas fa-id-card"></i> Data Pribadi</h4>
         <div class="biodata-grid">
@@ -1658,7 +1698,7 @@ function renderProfile() {
         </div>
       </div>`;
   } else if (profileUser.role === 'ortu') {
-    const anakRel = getAnakFromOrtu(currentUsername);
+    const anakRel = getAnakFromOrtu(App.session.username);
     sections = `
       <div class="biodata-section"><h4><i class="fas fa-id-card"></i> Data Pribadi</h4>
         <div class="biodata-grid">
@@ -1678,7 +1718,7 @@ function renderProfile() {
       <div class="biodata-section"><h4><i class="fas fa-id-card"></i> Data Admin</h4>
         <div class="biodata-grid">
           <div class="biodata-item"><span class="label">Nama Lengkap</span><span class="value">${nama}</span></div>
-          <div class="biodata-item"><span class="label">Username</span><span class="value">${currentUsername}</span></div>
+          <div class="biodata-item"><span class="label">Username</span><span class="value">${App.session.username}</span></div>
           <div class="biodata-item"><span class="label">Jabatan</span><span class="value">${profileUser.jabatan || 'Super Admin'}</span></div>
         </div>
       </div>`;
@@ -1698,12 +1738,12 @@ function renderProfile() {
 
 /* ---------- ADMIN PANEL ---------- */
 function renderAdminPanel() {
-  if (currentUser !== 'admin') return;
+  if (App.session.role !== 'admin') return;
   populateSiswaDropdown();
 
   const userList = document.getElementById('userList');
   let html = `<table><tr><th>Username</th><th>Nama</th><th>Role</th><th>Detail</th></tr>`;
-  for (const [un, d] of Object.entries(USERS)) {
+  for (const [un, d] of Object.entries(App.state.users)) {
     let detail = '-';
     if (d.role === 'siswa') detail = `NIS: ${d.nis||'-'} | ${d.kelas||'-'}`;
     else if (d.role === 'guru') detail = `NIP: ${d.nip||'-'} | ${d.mapel||'-'}`;
@@ -1719,11 +1759,11 @@ function renderAdminPanel() {
   html += `</table>`;
   userList.innerHTML = html;
 
-  const tot = Object.keys(USERS).length;
-  const sis = Object.values(USERS).filter(u=>u.role==='siswa').length;
-  const gur = Object.values(USERS).filter(u=>u.role==='guru').length;
-  const ort = Object.values(USERS).filter(u=>u.role==='ortu').length;
-  const adm = Object.values(USERS).filter(u=>u.role==='admin').length;
+  const tot = Object.keys(App.state.users).length;
+  const sis = Object.values(App.state.users).filter(u=>u.role==='siswa').length;
+  const gur = Object.values(App.state.users).filter(u=>u.role==='guru').length;
+  const ort = Object.values(App.state.users).filter(u=>u.role==='ortu').length;
+  const adm = Object.values(App.state.users).filter(u=>u.role==='admin').length;
 
   document.getElementById('websiteStats').innerHTML = `
     <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:1rem;">
@@ -1739,14 +1779,14 @@ function populateSiswaDropdown() {
   const select = document.getElementById('newAnakUsername');
   if (!select) return;
   const cur = select.value;
-  const siswas = Object.entries(USERS).filter(([k,v]) => v.role === 'siswa');
+  const siswas = Object.entries(App.state.users).filter(([k,v]) => v.role === 'siswa');
   select.innerHTML = '<option value="">-- Pilih Siswa --</option>' +
     siswas.map(([k,v]) => `<option value="${k}">${v.fullName||v.name} (${v.kelas||'-'})</option>`).join('');
   if (cur) select.value = cur;
 }
 
 async function addUserFull() {
-  if (currentUser !== 'admin') return;
+  if (App.session.role !== 'admin') return;
   const username = document.getElementById('newUsername').value.trim().toLowerCase();
   const password = document.getElementById('newPassword').value.trim();
   const fullName = document.getElementById('newFullName').value.trim();
@@ -1755,7 +1795,7 @@ async function addUserFull() {
   if (!username || !password || !fullName) { toast('Lengkapi data!', 'error'); return; }
   if (!/^[a-z0-9_]{3,20}$/.test(username)) { toast('Username tidak valid!', 'error'); return; }
   if (password.length < 5) { toast('Password min 5 karakter!', 'error'); return; }
-  if (USERS[username]) { toast('Username sudah ada!', 'error'); return; }
+  if (App.state.users[username]) { toast('Username sudah ada!', 'error'); return; }
 
   const row = [username, password, role, fullName, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''];
   if (role === 'siswa') {
@@ -1786,7 +1826,7 @@ async function addUserFull() {
   showLoading('Menambah pengguna...');
   try {
     await apiPost('users', row);
-    USERS[username] = {
+    App.state.users[username] = {
       password, role, name: fullName, fullName,
       nis: row[4], nip: row[5], kelas: row[6], mapel: row[7],
       anakUsername: row[8], hubungan: row[9], jabatan: row[10],
@@ -1814,7 +1854,7 @@ function clearForm() {
    EDITOR DATA (Admin)
    ============================================================ */
 function switchEditorTab(tab) {
-  currentEditorTab = tab;
+  App.ui.currentEditorTab = tab;
   document.querySelectorAll('[data-editor]').forEach(b => b.classList.remove('active'));
   document.querySelector(`[data-editor="${tab}"]`)?.classList.add('active');
   renderEditor();
@@ -1824,9 +1864,9 @@ function renderEditor() {
   const container = document.getElementById('editorContent');
   if (!container) return;
 
-  if (currentEditorTab === 'tasks') {
-    container.innerHTML = `<h4 style="color:var(--primary); margin-bottom:0.8rem;">📚 Data Tugas (${DATA_TASKS.length})</h4>` +
-      (DATA_TASKS.length ? DATA_TASKS.map(t => `
+  if (App.ui.currentEditorTab === 'tasks') {
+    container.innerHTML = `<h4 style="color:var(--primary); margin-bottom:0.8rem;">📚 Data Tugas (${App.state.tasks.length})</h4>` +
+      (App.state.tasks.length ? App.state.tasks.map(t => `
         <div class="task-item">
           <div style="flex:1; min-width:200px;">
             <h4>${t.judul}</h4>
@@ -1839,9 +1879,9 @@ function renderEditor() {
           </div>
         </div>`).join('') : '<div class="empty-state"><p>Belum ada tugas.</p></div>');
 
-  } else if (currentEditorTab === 'info') {
-    container.innerHTML = `<h4 style="color:var(--primary); margin-bottom:0.8rem;">📢 Pengumuman (${DATA_INFO.length})</h4>` +
-      (DATA_INFO.length ? DATA_INFO.map(i => `
+  } else if (App.ui.currentEditorTab === 'info') {
+    container.innerHTML = `<h4 style="color:var(--primary); margin-bottom:0.8rem;">📢 Pengumuman (${App.state.info.length})</h4>` +
+      (App.state.info.length ? App.state.info.map(i => `
         <div class="info-item">
           <strong>${i.judul}</strong> <small style="color:var(--text-muted)">(${formatDate(i.tanggal)})</small>
           <p style="margin-top:4px; font-size:0.9rem;">${i.isi}</p>
@@ -1852,12 +1892,12 @@ function renderEditor() {
           </div>
         </div>`).join('') : '<div class="empty-state"><p>Belum ada pengumuman.</p></div>');
 
-  } else if (currentEditorTab === 'attendance') {
-    const recent = DATA_ATTENDANCE.slice().sort((a,b)=>new Date(b.tanggal)-new Date(a.tanggal)).slice(0,100);
-    container.innerHTML = `<h4 style="color:var(--primary); margin-bottom:0.8rem;">📋 Absensi (100 terbaru dari ${DATA_ATTENDANCE.length})</h4>
+  } else if (App.ui.currentEditorTab === 'attendance') {
+    const recent = App.state.attendance.slice().sort((a,b)=>new Date(b.tanggal)-new Date(a.tanggal)).slice(0,100);
+    container.innerHTML = `<h4 style="color:var(--primary); margin-bottom:0.8rem;">📋 Absensi (100 terbaru dari ${App.state.attendance.length})</h4>
       <table><tr><th>Tanggal</th><th>Nama</th><th>Kelas</th><th>Status</th><th>Aksi</th></tr>
       ${recent.map(a => {
-        const u = USERS[a.username];
+        const u = App.state.users[a.username];
         return `<tr>
           <td>${formatDate(a.tanggal)}</td>
           <td>${u?.fullName||u?.name||a.username}</td>
@@ -1868,17 +1908,17 @@ function renderEditor() {
       }).join('')}
       </table>`;
 
-  } else if (currentEditorTab === 'submissions') {
+  } else if (App.ui.currentEditorTab === 'submissions') {
     const items = [];
-    Object.entries(DATA_SUBMISSIONS).forEach(([siswa, subs]) => {
+    Object.entries(App.state.submissions).forEach(([siswa, subs]) => {
       Object.entries(subs).forEach(([taskId, sub]) => {
         items.push({ siswa, taskId, sub });
       });
     });
     container.innerHTML = `<h4 style="color:var(--primary); margin-bottom:0.8rem;">📝 Submission (${items.length})</h4>` +
       (items.length ? items.map(it => {
-        const u = USERS[it.siswa];
-        const t = DATA_TASKS.find(x => x.id === it.taskId);
+        const u = App.state.users[it.siswa];
+        const t = App.state.tasks.find(x => x.id === it.taskId);
         return `<div class="task-item">
           <div style="flex:1; min-width:200px;">
             <h4>${t?.judul || it.taskId}</h4>
@@ -1892,16 +1932,16 @@ function renderEditor() {
         </div>`;
       }).join('') : '<div class="empty-state"><p>Belum ada submission.</p></div>');
 
-  } else if (currentEditorTab === 'schedule') {
+  } else if (App.ui.currentEditorTab === 'schedule') {
     const kelasList = ['X TKJ','X DKV','X AKL','XI TKJ','XI DKV','XI AKL','XII TKJ','XII DKV','XII AKL'];
-    const fk = _editScheduleKelas;
-    const rows = DATA_SCHEDULE.filter(s => s.kelas === fk);
+    const fk = App.ui.editScheduleKelas;
+    const rows = App.state.schedule.filter(s => s.kelas === fk);
 
     container.innerHTML = `
       <h4 style="color:var(--primary); margin-bottom:0.8rem;">📅 Jadwal Pelajaran</h4>
       <div style="margin-bottom:1rem; display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
         <label style="font-weight:600;">Kelas:</label>
-        <select onchange="_editScheduleKelas=this.value; renderEditor();" style="width:auto; margin:0;">
+        <select onchange="App.ui.editScheduleKelas=this.value; renderEditor();" style="width:auto; margin:0;">
           ${kelasList.map(k => `<option value="${k}" ${k===fk?'selected':''}>${k}</option>`).join('')}
         </select>
         <button class="btn-success btn-sm" onclick="generateDefaultSchedule('${fk}')">
@@ -1933,11 +1973,11 @@ function renderEditor() {
       </div>
     `;
 
-  } else if (currentEditorTab === 'users') {
-    container.innerHTML = `<h4 style="color:var(--primary); margin-bottom:0.8rem;">👥 Pengguna (${Object.keys(USERS).length})</h4>
+  } else if (App.ui.currentEditorTab === 'users') {
+    container.innerHTML = `<h4 style="color:var(--primary); margin-bottom:0.8rem;">👥 Pengguna (${Object.keys(App.state.users).length})</h4>
       <table>
         <tr><th>Username</th><th>Nama</th><th>Role</th><th>Detail</th><th>Aksi</th></tr>
-        ${Object.entries(USERS).map(([un, u]) => {
+        ${Object.entries(App.state.users).map(([un, u]) => {
           let detail = '-';
           if (u.role === 'siswa') detail = `NIS: ${u.nis||'-'} | ${u.kelas||'-'}`;
           else if (u.role === 'guru') detail = `NIP: ${u.nip||'-'} | ${u.mapel||'-'}`;
@@ -1960,7 +2000,7 @@ function renderEditor() {
 
 /* ---------- EDIT TUGAS ---------- */
 function editTask(id) {
-  const t = DATA_TASKS.find(x => x.id === id);
+  const t = App.state.tasks.find(x => x.id === id);
   if (!t) return;
   showModal('Edit Tugas', `
     <label style="font-size:0.85rem; font-weight:600;">Judul</label>
@@ -2000,7 +2040,7 @@ function editTask(id) {
 
 /* ---------- EDIT INFO ---------- */
 function editInfo(id) {
-  const i = DATA_INFO.find(x => x.id === id);
+  const i = App.state.info.find(x => x.id === id);
   if (!i) return;
   showModal('Edit Pengumuman', `
     <label style="font-size:0.85rem; font-weight:600;">Judul</label>
@@ -2033,7 +2073,7 @@ function editInfo(id) {
 
 /* ---------- EDIT USER ---------- */
 function editUserAdmin(username) {
-  const u = USERS[username];
+  const u = App.state.users[username];
   if (!u) return;
   showModal(`Edit Pengguna: ${username}`, `
     <label style="font-size:0.85rem; font-weight:600;">Nama Lengkap</label>
@@ -2105,7 +2145,7 @@ async function deleteEntity(sheetName, id) {
   showLoading('Menghapus...');
   try {
     await apiPost(sheetName, { action: 'delete', id });
-    if (sheetName === 'info') DATA_INFO = DATA_INFO.filter(i => i.id !== id);
+    if (sheetName === 'info') App.state.info = App.state.info.filter(i => i.id !== id);
     toast('✅ Data dihapus!', 'success');
     renderAll();
   } catch(e) {}
@@ -2114,7 +2154,7 @@ async function deleteEntity(sheetName, id) {
 
 function deleteAttendance(username, tanggal) {
   if (!confirm('Hapus record absensi ini?')) return;
-  DATA_ATTENDANCE = DATA_ATTENDANCE.filter(a => !(a.username === username && a.tanggal === tanggal));
+  App.state.attendance = App.state.attendance.filter(a => !(a.username === username && a.tanggal === tanggal));
   toast('Dihapus dari tampilan. Hapus manual di Sheets jika perlu.', 'info');
   renderAll();
 }
@@ -2124,7 +2164,7 @@ async function deleteSubmission(siswa, taskId) {
   showLoading('Menghapus...');
   try {
     await apiPost('submissions', { action: 'delete', id: siswa });
-    delete DATA_SUBMISSIONS[siswa]?.[taskId];
+    delete App.state.submissions[siswa]?.[taskId];
     toast('✅ Submission dihapus!', 'success');
     renderAll();
   } catch(e) {}
@@ -2137,7 +2177,7 @@ async function deleteUserAdmin(username) {
   showLoading('Menghapus...');
   try {
     await apiPost('users', { action: 'delete', id: username });
-    delete USERS[username];
+    delete App.state.users[username];
     toast('✅ Pengguna dihapus!', 'success');
     renderAll();
   } catch(e) {}
@@ -2175,7 +2215,7 @@ function addScheduleRow(kelas) {
         mapel
       ];
       await apiPost('schedule', row);
-      DATA_SCHEDULE.push({
+      App.state.schedule.push({
         id, kelas, hari: row[2],
         jam_mulai: row[3], jam_selesai: row[4], mapel
       });
@@ -2191,7 +2231,7 @@ async function deleteScheduleRow(id) {
   showLoading('Menghapus...');
   try {
     await apiPost('schedule', { action: 'delete', id });
-    DATA_SCHEDULE = DATA_SCHEDULE.filter(s => s.id !== id);
+    App.state.schedule = App.state.schedule.filter(s => s.id !== id);
     toast('✅ Baris dihapus!', 'success');
     renderAll();
   } catch(e) {}
@@ -2202,9 +2242,9 @@ async function deleteAllSchedule(kelas) {
   if (!confirm(`Hapus SEMUA jadwal kelas ${kelas}?`)) return;
   showLoading('Menghapus...');
   try {
-    const rows = DATA_SCHEDULE.filter(s => s.kelas === kelas);
+    const rows = App.state.schedule.filter(s => s.kelas === kelas);
     for (const r of rows) await apiPost('schedule', { action: 'delete', id: r.id });
-    DATA_SCHEDULE = DATA_SCHEDULE.filter(s => s.kelas !== kelas);
+    App.state.schedule = App.state.schedule.filter(s => s.kelas !== kelas);
     toast('✅ Semua jadwal kelas dihapus!', 'success');
     renderAll();
   } catch(e) {}
@@ -2217,9 +2257,9 @@ async function generateDefaultSchedule(kelas) {
   if (!gen) { toast('Generator kelas ini tidak tersedia.', 'error'); return; }
   showLoading('Generate jadwal...');
   try {
-    const old = DATA_SCHEDULE.filter(s => s.kelas === kelas);
+    const old = App.state.schedule.filter(s => s.kelas === kelas);
     for (const r of old) await apiPost('schedule', { action: 'delete', id: r.id });
-    DATA_SCHEDULE = DATA_SCHEDULE.filter(s => s.kelas !== kelas);
+    App.state.schedule = App.state.schedule.filter(s => s.kelas !== kelas);
 
     const hariList = ['Senin','Selasa','Rabu','Kamis','Jumat'];
     for (const hari of hariList) {
@@ -2229,7 +2269,7 @@ async function generateDefaultSchedule(kelas) {
         const id = 'S' + Date.now() + Math.random().toString(36).slice(2,6);
         const row = [id, kelas, hari, slot.mulai, slot.selesai, slot.mapel];
         await apiPost('schedule', row);
-        DATA_SCHEDULE.push({
+        App.state.schedule.push({
           id, kelas, hari,
           jam_mulai: slot.mulai, jam_selesai: slot.selesai, mapel: slot.mapel
         });
@@ -2264,11 +2304,11 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     document.getElementById('tab-' + tabId).classList.add('active');
     this.classList.add('active');
-    if (tabId === 'admin' && currentUser === 'admin') renderAdminPanel();
-    if (tabId === 'editor' && currentUser === 'admin') renderEditor();
-    if (tabId === 'absen' && (currentUser === 'guru' || currentUser === 'admin')) renderAbsenSiswaList();
+    if (tabId === 'admin' && App.session.role === 'admin') renderAdminPanel();
+    if (tabId === 'editor' && App.session.role === 'admin') renderEditor();
+    if (tabId === 'absen' && (App.session.role === 'guru' || App.session.role === 'admin')) renderAbsenSiswaList();
     if (tabId === 'jadwal') renderSchedule();
-    if (tabId === 'penilaian' && (currentUser === 'guru' || currentUser === 'admin')) renderSubmissionList();
+    if (tabId === 'penilaian' && (App.session.role === 'guru' || App.session.role === 'admin')) renderSubmissionList();
     if (tabId === 'nilai') renderProfile();
   });
 });
@@ -2282,7 +2322,7 @@ document.getElementById('passwordInput').addEventListener('keypress', e => {
 document.addEventListener('keydown', function(e) {
   if (e.ctrlKey && e.shiftKey && (e.key === 'A' || e.key === 'a' || e.code === 'KeyA')) {
     e.preventDefault();
-    if (currentUser) { toast('Sudah login!', 'warning'); return; }
+    if (App.session.role) { toast('Sudah login!', 'warning'); return; }
     const panel = document.getElementById('adminLoginPanel');
     const roleSelect = document.getElementById('roleSelect');
     if (!panel || !roleSelect) return;
@@ -2311,6 +2351,15 @@ const absenTglInit = document.getElementById('absenTanggal');
 if (absenTglInit) absenTglInit.value = today();
 const jadwalSelectInit = document.getElementById('jadwalKelasSelect');
 if (jadwalSelectInit) jadwalSelectInit.value = 'X TKJ';
+
+
+/* ============================================================
+   APP INIT
+   ============================================================ */
+document.addEventListener('DOMContentLoaded', () => {
+  console.log('✅ SMK Avicena Portal — Viel Refactor v1 ready');
+});
+
 </script>
 </body>
 </html>
